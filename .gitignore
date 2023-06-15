@@ -22,3 +22,5 @@ go.work
 
 # GoLand project directory
 .idea
+
+kubectl_node_logs
