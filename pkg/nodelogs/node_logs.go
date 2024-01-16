@@ -6,9 +6,18 @@ package nodelogs
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/resource"
+	kcmdutil "k8s.io/kubectl/pkg/cmd/util"
+	"k8s.io/kubectl/pkg/scheme"
+	"k8s.io/kubectl/pkg/util"
 )
 
 const (
@@ -78,6 +87,7 @@ func NewCmd(streams genericclioptions.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          nodeLogsUsageStr,
 		Short:        "Display and filter node logs",
+		Long:         nodeLogsLong,
 		Example:      fmt.Sprintf(nodeLogsExample, "kubectl"),
 		SilenceUsage: true,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -107,4 +117,121 @@ func (f *CmdFlags) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&f.Selector, "selector", "l", f.Selector, "Selector (label query) to filter on.")
 	cmd.Flags().BoolVar(&f.Raw, "raw", f.Raw, "Perform no transformation of the returned data.")
 	cmd.Flags().BoolVar(&f.Unify, "unify", f.Unify, "Interleave logs by sorting the output. Defaults on when viewing node journal logs.")
+}
+
+// ToOptions converts from CLI inputs to runtime inputs.
+func (f *CmdFlags) ToOptions(args []string, bootChanged bool) (*CmdOptions, error) {
+	o := &CmdOptions{
+		Unify:     f.Unify,
+		Raw:       f.Raw,
+		Resources: args,
+		IOStreams: f.IOStreams,
+	}
+
+	if bootChanged {
+		o.Boot = &f.Boot
+	}
+
+	if len(f.Query) > 0 {
+		o.Query = f.Query
+	}
+
+	files, services := parseQuery(f.Query)
+	if files == 0 || services > 0 {
+		o.Raw = true
+		o.Unify = true
+	}
+
+	if len(f.SinceTime) > 0 {
+		t, err := util.ParseRFC3339(f.SinceTime, metav1.Now)
+		if err != nil {
+			return nil, err
+		}
+
+		o.SinceTime = &t
+	}
+
+	if len(f.UntilTime) > 0 {
+		t, err := util.ParseRFC3339(f.UntilTime, metav1.Now)
+		if err != nil {
+			return nil, err
+		}
+
+		o.UntilTime = &t
+	}
+
+	if len(f.Pattern) > 0 {
+		o.Pattern = f.Pattern
+	}
+
+	if f.TailLines > 0 {
+		o.TailLines = &f.TailLines
+	}
+
+	var nodeSelectorTail int64 = 10
+	if len(f.Selector) > 0 && o.TailLines == nil {
+		o.TailLines = &nodeSelectorTail
+	}
+
+	factory := kcmdutil.NewFactory(f.configFlags)
+	builder := factory.NewBuilder().
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
+		SingleResourceType()
+
+	if len(o.Resources) > 0 {
+		builder.ResourceNames("nodes", o.Resources...)
+	}
+	if len(o.Role) > 0 {
+		req, err := labels.NewRequirement(fmt.Sprintf("node-role.kubernetes.io/%s", o.Role), selection.Exists, nil)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --role: %v", err)
+		}
+		o.Selector = req.String()
+	}
+	if len(o.Selector) > 0 {
+		builder.ResourceTypes("nodes").LabelSelectorParam(o.Selector)
+	}
+	o.Builder = builder
+
+	// Initialize here so that NodeLogsConsumeRequest has the cmdOptions set
+	//o.ConsumeRequestFn = o.NodeLogsConsumeRequest
+
+	return o, nil
+}
+
+type CmdOptions struct {
+	Resources []string
+	Selector  string
+	Role      string
+
+	Query     []string
+	Pattern   string
+	Boot      *int64
+	SinceTime *metav1.Time
+	UntilTime *metav1.Time
+	TailLines *int64
+	// output format arguments
+	// raw is set to true when we are viewing the journal and wish to skip prefixing
+	Raw    bool
+	Unify  bool
+	Prefix bool
+
+	RESTClientGetter func(mapping *meta.RESTMapping) (resource.RESTClient, error)
+	Builder          *resource.Builder
+	//ConsumeRequestFn func(rest.ResponseWrapper, corev1.ObjectReference, io.Writer) error
+
+	genericclioptions.IOStreams
+}
+
+// parseQuery traverses the query slice and returns the number of files and services
+func parseQuery(query []string) (int, int) {
+	var files, services int
+	for _, q := range query {
+		if strings.ContainsAny(q, "/\\") {
+			files++
+		} else {
+			services++
+		}
+	}
+	return files, services
 }
