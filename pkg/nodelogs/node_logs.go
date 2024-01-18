@@ -90,8 +90,10 @@ func NewCmd(streams genericclioptions.IOStreams) *cobra.Command {
 		Long:         nodeLogsLong,
 		Example:      fmt.Sprintf(nodeLogsExample, "kubectl"),
 		SilenceUsage: true,
-		RunE: func(c *cobra.Command, args []string) error {
-			return nil
+		Run: func(cmd *cobra.Command, args []string) {
+			o, err := f.ToOptions(args, cmd.Flags().Changed("boot"))
+			kcmdutil.CheckErr(err)
+			kcmdutil.CheckErr(o.Validate())
 		},
 	}
 	f.AddFlags(cmd)
@@ -193,9 +195,6 @@ func (f *CmdFlags) ToOptions(args []string, bootChanged bool) (*CmdOptions, erro
 	}
 	o.Builder = builder
 
-	// Initialize here so that NodeLogsConsumeRequest has the cmdOptions set
-	//o.ConsumeRequestFn = o.NodeLogsConsumeRequest
-
 	return o, nil
 }
 
@@ -218,9 +217,24 @@ type CmdOptions struct {
 
 	RESTClientGetter func(mapping *meta.RESTMapping) (resource.RESTClient, error)
 	Builder          *resource.Builder
-	//ConsumeRequestFn func(rest.ResponseWrapper, corev1.ObjectReference, io.Writer) error
 
 	genericclioptions.IOStreams
+}
+
+func (o *CmdOptions) Validate() error {
+	if len(o.Resources) == 0 && len(o.Selector) == 0 {
+		return fmt.Errorf("at least one node name or a selector (-l) must be specified")
+	}
+	if len(o.Resources) > 0 && len(o.Selector) > 0 {
+		return fmt.Errorf("node names and selector may not both be specified")
+	}
+	if o.TailLines != nil && *o.TailLines < -1 {
+		return fmt.Errorf("--tail must be greater than or equal to -1")
+	}
+	if o.Boot != nil && (*o.Boot < -100 || *o.Boot > 0) {
+		return fmt.Errorf("--boot accepts values [-100, 0]")
+	}
+	return nil
 }
 
 // parseQuery traverses the query slice and returns the number of files and services
