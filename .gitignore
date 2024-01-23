@@ -24,3 +24,4 @@ go.work
 .idea
 
 kubectl_node_logs
+kubectl-node_logs
