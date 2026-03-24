@@ -404,20 +404,35 @@ func (req *logRequest) writeTo(out io.Writer) error {
 		return err
 	}
 	defer in.Close()
+	return req.writeToReader(out, in)
+}
+
+// writeToReader contains the core output logic for a log response and is
+// separated from writeTo to allow unit testing without a live API server.
+func (req *logRequest) writeToReader(out io.Writer, in io.Reader) error {
+	var prefix []byte
+	if !req.skipPrefix {
+		prefix = []byte(fmt.Sprintf("%s ", req.node))
+	}
 
 	// raw output implies we may be getting binary content directly
 	// from the remote and so we want to perform no translation
 	if req.raw {
+		// Peek at the beginning of the response to check whether the server
+		// returned an HTML directory listing instead of log content.  This
+		// happens when a --query value matches a path entry rather than a
+		// journal service and the kubelet echoes back the /var/log directory.
+		bufferSize := 4096
+		buf := bufio.NewReaderSize(in, bufferSize)
+		head, _ := buf.Peek(bufferSize)
+		if bytes.HasPrefix(head, []byte("<pre>")) {
+			return outputDirectoryEntriesOrContent(out, buf, prefix)
+		}
 		// TODO: optionallyDecompress should be implemented by checking
 		// the content-encoding of the response, but we perform optional
 		// decompression here in case the content of the logs on the server
 		// is also gzipped.
-		return optionallyDecompress(out, in)
-	}
-
-	var prefix []byte
-	if !req.skipPrefix {
-		prefix = []byte(fmt.Sprintf("%s ", req.node))
+		return optionallyDecompress(out, buf)
 	}
 
 	return outputDirectoryEntriesOrContent(out, in, prefix)
@@ -450,7 +465,9 @@ func outputDirectoryEntriesOrContent(out io.Writer, in io.Reader, prefix []byte)
 	// turn href links into lines of output
 	content, _ := buf.Peek(bufferSize)
 	if bytes.HasPrefix(content, []byte("<pre>")) {
-		reLink := regexp.MustCompile(`href="([^"]+)"`)
+		// Match <a> tags in both old format (<a href="name/">name/</a>) and
+		// new format (<a>name/</a>) used by newer kubelet versions.
+		reLink := regexp.MustCompile(`<a[^>]*>([^<]+)</a>`)
 		s := bufio.NewScanner(buf)
 		s.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 			matches := reLink.FindSubmatchIndex(data)
